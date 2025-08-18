@@ -10,7 +10,7 @@ use axum::{
 use serde_json::{Value, json};
 
 use dotenvy::dotenv;
-use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, EntityTrait, Iden, ModelTrait, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, Iden, ModelTrait, QueryFilter, Set};
 use serde::Deserialize;
 use std::{env, net::SocketAddr};
 use sha2::{Sha256, Digest};
@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     tracing::info!("listening on http://{}", addr);
+    tracing::info!("listening on http://localhost:{}", addr.port());
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener,app.into_make_service()).await?;
     Ok(())
@@ -79,9 +80,29 @@ async fn signup(
     Json(payload): Json<CreateUserPayload>,
 ) -> Result<Json<entities::users::Model>, (axum::http::StatusCode, Json<Value>)> {
 
-    let name = payload.name.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Name not provided".to_string()) ))?;
     let email = payload.email.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Email not provided".to_string()) ))?;
+
+    if email.is_empty() || !email.contains("@") {
+        return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Invalid email address".to_string())));
+    }
+
+    let maybe_user = users::Entity::find()
+        .filter(users::Column::Email.eq(&email))
+        .one(&state.db)
+        .await.map_err(|_| {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, bad_response("Internal server error".to_string()))
+    })?;
+
+    if let Some(user) = maybe_user {
+        return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Email already exists.".to_string())))
+    }
+
+    let name = payload.name.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Name not provided".to_string()) ))?;
     let password = payload.password.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Password not provided".to_string()) ))?;
+
+    if password.chars().count() < 8 || password.chars().count() > 64 {
+        return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Password must be 8-64 characters long.".to_string())))
+    }
 
     let hash_password = to_sha256(&password);
 
@@ -97,7 +118,6 @@ async fn signup(
         Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, Json(json!({"msg": e.to_string()})) )),
     }
 }
-
 
 
 async fn get_user(
