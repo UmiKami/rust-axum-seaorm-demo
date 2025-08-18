@@ -10,11 +10,20 @@ use axum::{
 use serde_json::{Value, json};
 
 use dotenvy::dotenv;
-use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, EntityTrait, ModelTrait, Set};
+use sea_orm::{ActiveModelTrait, Database, DatabaseConnection, EntityTrait, Iden, ModelTrait, Set};
 use serde::Deserialize;
 use std::{env, net::SocketAddr};
+use sha2::{Sha256, Digest};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+
+fn to_sha256(value: &String) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value);
+    let hasher_res = hasher.finalize();
+
+    return format!("{:x}", hasher_res);
+}
 
 
 #[derive(Clone)]
@@ -41,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
             "msg": "Welcome to rust!"
         } )) } ))
         .route("/health", get(|| async { "ok" }))
-        .route("/users", post(create_user))
+        .route("/users", post(signup))
         .route("/users/{id}", get(get_user))
         .route("/users/{id}", delete(delete_user))
         .with_state(state);
@@ -56,25 +65,40 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Deserialize)]
 struct CreateUserPayload {
-    name: String,
-    email: String,
+    name: Option<String>,
+    email: Option<String>,
+    password: Option<String>,
 }
 
-async fn create_user(
+fn bad_response(msg: String) -> Json<Value> {
+    return Json(json!({ "error": msg }));
+}
+
+async fn signup(
     State(state): State<AppState>,
     Json(payload): Json<CreateUserPayload>,
-) -> Result<Json<entities::users::Model>, (axum::http::StatusCode, String)> {
+) -> Result<Json<entities::users::Model>, (axum::http::StatusCode, Json<Value>)> {
+
+    let name = payload.name.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Name not provided".to_string()) ))?;
+    let email = payload.email.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Email not provided".to_string()) ))?;
+    let password = payload.password.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Password not provided".to_string()) ))?;
+
+    let hash_password = to_sha256(&password);
+
     let new_user = users::ActiveModel {
-        name: Set(payload.name),
-        email: Set(payload.email),
+        name: Set(name),
+        email: Set(email),
+        password: Set(Option::from(hash_password)),
         ..Default::default()
     };
 
     match new_user.insert(&state.db).await {
         Ok(model) => Ok(Json(model)),
-        Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, e.to_string())),
+        Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, Json(json!({"msg": e.to_string()})) )),
     }
 }
+
+
 
 async fn get_user(
     State(state): State<AppState>,
