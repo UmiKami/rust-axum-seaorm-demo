@@ -13,7 +13,7 @@ impl MigrationTrait for Migration {
                     .table(Users::Table)
                     .add_column_if_not_exists(
                         ColumnDef::new(Users::Password)
-                            .integer()
+                            .string()
                             .null() // or .not_null() if required
                     )
                     .to_owned(),
