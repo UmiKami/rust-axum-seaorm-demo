@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
 
     let session_layer = SessionManagerLayer::new(session_store)
         .with_secure(false) // only disable in dev; enable in prod
-        .with_expiry(Expiry::OnInactivity(Duration::seconds(30)));
+        .with_expiry(Expiry::OnInactivity(Duration::seconds(3600)));
 
     let auth_layer = AuthManagerLayerBuilder::new(backend.clone(), session_layer).build();
 
