@@ -15,14 +15,19 @@ use std::sync::Arc;
 use argon2::{
     password_hash::{
         rand_core::OsRng,
-        PasswordHash, PasswordHasher, PasswordVerifier, SaltString
+         PasswordHasher, SaltString
     },
     Argon2
 };
-use axum::http::Method;
+use axum::http::{HeaderValue, Method};
 use axum::response::IntoResponse;
-use axum_login::{login_required, permission_required, tower_sessions::{MemoryStore, SessionManagerLayer}, AuthManagerLayerBuilder};
-use tower_http::cors::{AllowCredentials, Any, CorsLayer};
+use axum_login::{login_required, tower_sessions::{ SessionManagerLayer}, AuthManagerLayerBuilder};
+use tower_http::cors::{CorsLayer};
+
+use tower_sessions::{session_store::ExpiredDeletion, Expiry};
+use tower_sessions::cookie::time::Duration;
+use tower_sessions_sqlx_store::{sqlx::PgPool, PostgresStore};
+
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::auth::backend::Login;
 use crate::auth::SeaOrmBackend;
@@ -80,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/users/{id}", get(get_user))
         .route("/users/{id}", delete(delete_user))
+        .route("/logout", delete(logout))
         .route_layer(login_required!(SeaOrmBackend))
         .route("/", get(|| async {Json( json!( {
             "msg": "Welcome to rust!"
@@ -87,7 +93,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(|| async { "ok" }))
         .route("/signup", post(signup))
         .route("/login", post(login))
-        .route("/login", get(login))
         .layer(auth_layer)
         .layer(cors)
         .with_state(state);
@@ -163,8 +168,6 @@ async fn signup(
 
 type AuthSession = axum_login::AuthSession<SeaOrmBackend>;
 
-
-
 async fn login(
     mut auth_session: AuthSession,
     Form(creds): Form<Login>,
@@ -179,7 +182,7 @@ async fn login(
         return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    axum::http::StatusCode::OK.into_response()
+    (axum::http::StatusCode::OK, Json(json!({ "msg": "Login successful." }))).into_response()
 }
 
 async fn logout(mut auth_session: AuthSession) -> impl IntoResponse {
