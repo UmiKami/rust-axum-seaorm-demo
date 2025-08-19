@@ -182,6 +182,14 @@ async fn login(
     axum::http::StatusCode::OK.into_response()
 }
 
+async fn logout(mut auth_session: AuthSession) -> impl IntoResponse {
+    let _ = auth_session
+        .logout()
+        .await.map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, bad_response("Logout failed".to_string())).into_response());
+
+    (axum::http::StatusCode::OK, Json(json!({ "msg": "Logout successful." }))).into_response()
+}
+
 async fn get_user(
     State(state): State<AppState>,
     Path(id): Path<i32>,
