@@ -23,4 +23,6 @@ dotenvy = "0.15"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-sha2 = "0.10.9"
+axum-login = "0.18.0"
+argon2 = "0.5.3"
+tower-sessions = "0.14.0"

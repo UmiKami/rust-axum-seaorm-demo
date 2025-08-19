@@ -1,35 +1,38 @@
 mod entities;
+mod auth;
+
 use entities::users;
 
-use axum::{
-    extract::{Path, State},
-    routing::{get, post, delete},
-    Json, Router,
-};
+use axum::{extract::{Path, State}, routing::{get, post, delete}, Form, Json, Router};
 
 use serde_json::{Value, json};
 
 use dotenvy::dotenv;
-use sea_orm::{ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, Iden, ModelTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
 use std::{env, net::SocketAddr};
-use sha2::{Sha256, Digest};
+use std::sync::Arc;
+use argon2::{
+    password_hash::{
+        rand_core::OsRng,
+        PasswordHash, PasswordHasher, PasswordVerifier, SaltString
+    },
+    Argon2
+};
+use axum::http::Method;
+use axum::response::IntoResponse;
+use axum_login::{login_required, permission_required, tower_sessions::{MemoryStore, SessionManagerLayer}, AuthManagerLayerBuilder};
+use tower_http::cors::{AllowCredentials, Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-
-fn to_sha256(value: &String) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(value);
-    let hasher_res = hasher.finalize();
-
-    return format!("{:x}", hasher_res);
-}
-
+use crate::auth::backend::Login;
+use crate::auth::SeaOrmBackend;
 
 #[derive(Clone)]
 struct AppState {
-    db: DatabaseConnection
+    db: Arc<DatabaseConnection>
 }
+
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,20 +42,38 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let cors = CorsLayer::new()
+        // allow `GET` and `POST` when accessing the resource
+        .allow_methods([Method::GET, Method::POST])
+        // allow requests from any origin
+        .allow_origin(Any);
+
     let database_url = env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set (e.g. postgres://user:pass@localhost:5432/axsea)");
     let db = Database::connect(&database_url).await?;
+    let db = Arc::new(db);
 
-    let state = AppState { db };
+    let state = AppState { db: db.clone() }; // clone Arc
+    let backend = SeaOrmBackend { conn: db.clone() }; // same Arc
+
+    let session_store = MemoryStore::default();
+    let session_layer = SessionManagerLayer::new(session_store);
+
+    let auth_layer = AuthManagerLayerBuilder::new(backend.clone(), session_layer).build();
 
     let app = Router::new()
+        .route("/users/{id}", get(get_user))
+        .route("/users/{id}", delete(delete_user))
+        .route_layer(login_required!(SeaOrmBackend))
         .route("/", get(|| async {Json( json!( {
             "msg": "Welcome to rust!"
         } )) } ))
         .route("/health", get(|| async { "ok" }))
-        .route("/users", post(signup))
-        .route("/users/{id}", get(get_user))
-        .route("/users/{id}", delete(delete_user))
+        .route("/signup", post(signup))
+        .route("/login", post(login))
+        .route("/login", get(login))
+        .layer(auth_layer)
+        .layer(cors)
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
@@ -88,12 +109,12 @@ async fn signup(
 
     let maybe_user = users::Entity::find()
         .filter(users::Column::Email.eq(&email))
-        .one(&state.db)
+        .one(&*state.db)
         .await.map_err(|_| {
         (axum::http::StatusCode::INTERNAL_SERVER_ERROR, bad_response("Internal server error".to_string()))
     })?;
 
-    if let Some(user) = maybe_user {
+    if let Some(_) = maybe_user {
         return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Email already exists.".to_string())))
     }
 
@@ -104,27 +125,52 @@ async fn signup(
         return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Password must be 8-64 characters long.".to_string())))
     }
 
-    let hash_password = to_sha256(&password);
+    let salt = SaltString::generate(&mut OsRng);
+
+    let hash_password = Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, bad_response("Unable to hash password".to_string())))?
+        .to_string();
 
     let new_user = users::ActiveModel {
         name: Set(name),
         email: Set(email),
-        password: Set(Option::from(hash_password)),
+        password: Set(Some(hash_password)),
         ..Default::default()
     };
 
-    match new_user.insert(&state.db).await {
+    match new_user.insert(&*state.db).await {
         Ok(model) => Ok(Json(model)),
         Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, Json(json!({"msg": e.to_string()})) )),
     }
 }
 
+type AuthSession = axum_login::AuthSession<SeaOrmBackend>;
+
+
+
+async fn login(
+    mut auth_session: AuthSession,
+    Form(creds): Form<Login>,
+) -> impl IntoResponse {
+    let user = match auth_session.authenticate(creds).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
+        Err(_) => return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    if auth_session.login(&user).await.is_err() {
+        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    axum::http::StatusCode::OK.into_response()
+}
 
 async fn get_user(
     State(state): State<AppState>,
     Path(id): Path<i32>,
 ) -> Result<Json<entities::users::Model>, axum::http::StatusCode> {
-    let maybe = users::Entity::find_by_id(id).one(&state.db).await.map_err(|_| {
+    let maybe = users::Entity::find_by_id(id).one(&*state.db).await.map_err(|_| {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
@@ -140,7 +186,7 @@ async fn delete_user(
 ) -> Result<Json<Value>, axum::http::StatusCode> {
     
     let maybe_user_deleted = users::Entity::delete_by_id(id)
-        .exec(&state.db)
+        .exec(&*state.db)
         .await
         .map_err(|e| {
             tracing::error!("DB error: {e}");
