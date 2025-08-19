@@ -43,10 +43,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cors = CorsLayer::new()
-        // allow `GET` and `POST` when accessing the resource
-        .allow_methods([Method::GET, Method::POST])
-        // allow requests from any origin
-        .allow_origin(Any);
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_origin("http://localhost:5173".parse::<HeaderValue>()?)
+        .allow_headers([hyper::header::CONTENT_TYPE])
+        .allow_credentials(true);
 
     let database_url = env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set (e.g. postgres://user:pass@localhost:5432/axsea)");
