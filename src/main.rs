@@ -56,8 +56,24 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState { db: db.clone() }; // clone Arc
     let backend = SeaOrmBackend { conn: db.clone() }; // same Arc
 
-    let session_store = MemoryStore::default();
-    let session_layer = SessionManagerLayer::new(session_store);
+    // Connect sqlx Postgres pool for sessions
+    let session_db_url = env::var("SESSION_DATABASE_URL")
+        .expect("SESSION_DATABASE_URL must be set (postgres://user:pass@localhost:5432/sessions)");
+    let pool = PgPool::connect(&session_db_url).await?;
+
+    let session_store = PostgresStore::new(pool);
+    session_store.migrate().await?; // creates the sessions table
+
+    // background cleanup task for expired sessions
+    tokio::spawn(
+        session_store
+            .clone()
+            .continuously_delete_expired(tokio::time::Duration::from_secs(60)),
+    );
+
+    let session_layer = SessionManagerLayer::new(session_store)
+        .with_secure(false) // only disable in dev; enable in prod
+        .with_expiry(Expiry::OnInactivity(Duration::seconds(30)));
 
     let auth_layer = AuthManagerLayerBuilder::new(backend.clone(), session_layer).build();
 
