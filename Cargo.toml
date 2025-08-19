@@ -26,3 +26,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum-login = "0.18.0"
 argon2 = "0.5.3"
 tower-sessions = "0.14.0"
+hyper = "1.6.0"
+sqlx = "0.8.6"
+tower-sessions-sqlx-store = {version = "0.15.0", features = ["postgres"] }

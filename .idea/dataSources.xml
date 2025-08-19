@@ -8,5 +8,12 @@
       <jdbc-url>jdbc:postgresql:///axum_seaorm_demo</jdbc-url>
       <working-dir>$ProjectFileDir$</working-dir>
     </data-source>
+    <data-source source="LOCAL" name="axum_sessions@localhost" uuid="0db270eb-bc58-4e6f-8378-8d4fb29677fb">
+      <driver-ref>postgresql</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>org.postgresql.Driver</jdbc-driver>
+      <jdbc-url>jdbc:postgresql://localhost:5432/axum_sessions</jdbc-url>
+      <working-dir>$ProjectFileDir$</working-dir>
+    </data-source>
   </component>
 </project>
