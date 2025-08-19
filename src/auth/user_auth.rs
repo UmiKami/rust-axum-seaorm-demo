@@ -14,4 +14,6 @@ impl AuthUser for users::Model {
             None => &[],
         }
     }
+
+
 }

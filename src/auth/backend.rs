@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
-use axum_login::{AuthUser, AuthnBackend};
+use axum_login::{AuthSession, AuthUser, AuthnBackend};
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use serde::Deserialize;
 use crate::entities::users;
