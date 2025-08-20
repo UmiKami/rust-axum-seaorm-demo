@@ -29,3 +29,5 @@ tower-sessions = "0.14.0"
 hyper = "1.6.0"
 sqlx = "0.8.6"
 tower-sessions-sqlx-store = {version = "0.15.0", features = ["postgres"] }
+rand = "0.8.5"
+axum-csrf-simple = "0.1.3"
