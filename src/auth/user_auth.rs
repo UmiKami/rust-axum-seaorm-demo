@@ -15,5 +15,4 @@ impl AuthUser for users::Model {
         }
     }
 
-
 }
