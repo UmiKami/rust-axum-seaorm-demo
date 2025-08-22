@@ -242,3 +242,28 @@ async fn delete_user(
     }
 
 }
+
+#[derive(Deserialize)]
+struct CreateTodoPayload {
+    is_done: Option<bool>,
+    text: String,
+}
+
+async fn create_todo(
+    State(state): State<AppState>,
+    auth_session: AuthSession,
+    Json(payload): Json<CreateTodoPayload>,
+) -> Result<Json<entities::todos::Model>, (axum::http::StatusCode, Json<Value>)> {
+    let text = payload.text;
+    let is_done = Ok(payload.is_done.unwrap_or(false));
+
+    let new_todo = entities::todos::ActiveModel {
+        text: Set(text),
+        is_done: Set(is_done?),
+        user_id: Set(auth_session.user.unwrap().id),
+        ..Default::default()
+    };
+
+    // TODO Insert new todo into database
+
+}
