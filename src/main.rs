@@ -1,17 +1,49 @@
 mod entities;
 mod auth;
 
-use entities::users;
+// AXUM RELATED IMPORTS
+use axum::{
+    Form, Json, Router,
+    extract::{Path, State},
+    routing::{get, post, delete},
+    http::{HeaderValue, Method},
+    response::IntoResponse
+};
 
-use axum::{extract::{Path, State}, routing::{get, post, delete}, Form, Json, Router};
-
+use axum_login::{login_required, tower_sessions::{ SessionManagerLayer}, AuthManagerLayerBuilder};
+use axum_csrf_simple::{csrf_protect, get_csrf_token, set_csrf_token_sign_key};
+use tower_http::cors::{CorsLayer};
+use tower_sessions::{
+    Expiry,
+    session_store::ExpiredDeletion,
+    cookie::time::Duration,
+};
+use tower_sessions_sqlx_store::{sqlx::PgPool, PostgresStore};
 use serde_json::{Value, json};
-
-use dotenvy::dotenv;
-use sea_orm::{ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use serde::Deserialize;
+
+use crate::auth::{
+    backend::Login,
+    SeaOrmBackend
+};
+
+// DATABASE IMPORTS
+use entities::{
+    users,
+    todos,
+    helper::{
+        db_insert,
+    },
+};
+use sea_orm::{ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter, Set};
+
+// SYSTEM IMPORTS
+use dotenvy::dotenv;
 use std::{env, net::SocketAddr};
 use std::sync::Arc;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+// OTHER
 use argon2::{
     password_hash::{
         rand_core::OsRng,
@@ -19,25 +51,20 @@ use argon2::{
     },
     Argon2
 };
-use axum::http::{HeaderValue, Method};
-use axum::response::IntoResponse;
-use axum_login::{login_required, tower_sessions::{ SessionManagerLayer}, AuthManagerLayerBuilder};
-use tower_http::cors::{CorsLayer};
 
-use tower_sessions::{session_store::ExpiredDeletion, Expiry};
-use tower_sessions::cookie::time::Duration;
-use tower_sessions_sqlx_store::{sqlx::PgPool, PostgresStore};
-use axum_csrf_simple::{csrf_protect, get_csrf_token, set_csrf_token_sign_key};
 
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use crate::auth::backend::Login;
-use crate::auth::SeaOrmBackend;
+// region local helper functions
+
+fn bad_response(msg: String) -> Json<Value> {
+    Json(json!({ "error": msg }))
+}
+
+// endregion
 
 #[derive(Clone)]
 struct AppState {
     db: Arc<DatabaseConnection>
 }
-
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -111,6 +138,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+// region User Endpoints
 
 #[derive(Deserialize)]
 struct CreateUserPayload {
@@ -119,9 +147,6 @@ struct CreateUserPayload {
     password: Option<String>,
 }
 
-fn bad_response(msg: String) -> Json<Value> {
-    Json(json!({ "error": msg }))
-}
 
 async fn signup(
     State(state): State<AppState>,
@@ -166,10 +191,7 @@ async fn signup(
         ..Default::default()
     };
 
-    match new_user.insert(&*state.db).await {
-        Ok(model) => Ok(Json(model)),
-        Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, Json(json!({"msg": e.to_string()})) )),
-    }
+    db_insert::<users::Entity>(state, new_user).await
 }
 
 type AuthSession = axum_login::AuthSession<SeaOrmBackend>;
@@ -243,6 +265,10 @@ async fn delete_user(
 
 }
 
+// endregion
+
+// region todos
+
 #[derive(Deserialize)]
 struct CreateTodoPayload {
     is_done: Option<bool>,
@@ -264,6 +290,7 @@ async fn create_todo(
         ..Default::default()
     };
 
-    // TODO Insert new todo into database
-
+    db_insert::<todos::Entity>(state, new_todo).await
 }
+
+// endregion
