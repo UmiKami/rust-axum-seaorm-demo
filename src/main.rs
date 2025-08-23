@@ -5,7 +5,7 @@ mod auth;
 use axum::{
     Form, Json, Router,
     extract::{Path, State},
-    routing::{get, post, delete},
+    routing::{get, post, delete, put},
     http::{HeaderValue, Method},
     response::IntoResponse
 };
@@ -35,7 +35,7 @@ use entities::{
         db_insert,
     },
 };
-use sea_orm::{ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ActiveValue, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter, Set};
 
 // SYSTEM IMPORTS
 use dotenvy::dotenv;
@@ -52,7 +52,7 @@ use argon2::{
     Argon2
 };
 use axum::http::StatusCode;
-
+use crate::entities::prelude::Todos;
 // region local helper functions
 
 fn bad_response(msg: String) -> Json<Value> {
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     set_csrf_secure_cookie_enable(true).await;
 
     let database_url = env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set (e.g. postgres://user:pass@localhost:5432/axsea)");
+        .expect("DATABASE_URL must be set (e.g. postgres://user:pass@localhost:5432/axum_seaorm_demo)");
     let db = Database::connect(&database_url).await?;
     let db = Arc::new(db);
 
@@ -119,6 +119,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/users/{id}", delete(delete_user))
         .route("/todos", get(get_todos))
         .route("/todos", post(create_todo))
+        .route("/todos/{id}", put(update_todo))
         .route("/logout", delete(logout))
         .route_layer(login_required!(SeaOrmBackend))
         .route("/", get(|| async {Json( json!( {
@@ -134,9 +135,10 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    tracing::info!("listening on http://{}", addr);
-    tracing::info!("listening on http://localhost:{}", addr.port());
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    tracing::info!("listening on https://{}", addr);
+    tracing::info!("listening on https://localhost:{}", addr.port());
+
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(anyhow::Error::new)?;
     axum::serve(listener,app.into_make_service()).await?;
     Ok(())
 }
@@ -154,37 +156,37 @@ struct CreateUserPayload {
 async fn signup(
     State(state): State<AppState>,
     Json(payload): Json<CreateUserPayload>,
-) -> Result<Json<users::Model>, (axum::http::StatusCode, Json<Value>)> {
+) -> Result<Json<users::Model>, (StatusCode, Json<Value>)> {
 
-    let email = payload.email.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Email not provided".to_string()) ))?;
+    let email = payload.email.ok_or((StatusCode::BAD_REQUEST, bad_response("Email not provided".to_string()) ))?;
 
     if email.is_empty() || !email.contains("@") {
-        return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Invalid email address".to_string())));
+        return Err((StatusCode::BAD_REQUEST, bad_response("Invalid email address".to_string())));
     }
 
     let maybe_user = users::Entity::find()
         .filter(users::Column::Email.eq(&email))
         .one(&*state.db)
         .await.map_err(|_| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, bad_response("Internal server error".to_string()))
+        (StatusCode::INTERNAL_SERVER_ERROR, bad_response("Internal server error".to_string()))
     })?;
 
     if let Some(_) = maybe_user {
-        return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Email already exists.".to_string())))
+        return Err((StatusCode::BAD_REQUEST, bad_response("Email already exists.".to_string())))
     }
 
-    let name = payload.name.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Name not provided".to_string()) ))?;
-    let password = payload.password.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Password not provided".to_string()) ))?;
+    let name = payload.name.ok_or((StatusCode::BAD_REQUEST, bad_response("Name not provided".to_string()) ))?;
+    let password = payload.password.ok_or((StatusCode::BAD_REQUEST, bad_response("Password not provided".to_string()) ))?;
 
     if password.chars().count() < 8 || password.chars().count() > 64 {
-        return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Password must be 8-64 characters long.".to_string())))
+        return Err((StatusCode::BAD_REQUEST, bad_response("Password must be 8-64 characters long.".to_string())))
     }
 
     let salt = SaltString::generate(&mut OsRng);
 
     let hash_password = Argon2::default()
         .hash_password(password.as_bytes(), &salt)
-        .map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, bad_response("Unable to hash password".to_string())))?
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, bad_response("Unable to hash password".to_string())))?
         .to_string();
 
     let new_user = users::ActiveModel {
@@ -205,65 +207,65 @@ async fn login(
 ) -> impl IntoResponse {
     let user = match auth_session.authenticate(creds).await {
         Ok(Some(user)) => user,
-        Ok(None) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
-        Err(_) => return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
 
     if auth_session.login(&user).await.is_err() {
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    (axum::http::StatusCode::OK, Json(json!({ "msg": "Login successful." }))).into_response()
+    (StatusCode::OK, Json(json!({ "msg": "Login successful." }))).into_response()
 }
 
 async fn logout(mut auth_session: AuthSession) -> impl IntoResponse {
     let _ = auth_session
         .logout()
-        .await.map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, bad_response("Logout failed".to_string())).into_response());
+        .await.map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, bad_response("Logout failed".to_string())).into_response());
 
-    (axum::http::StatusCode::OK, Json(json!({ "msg": "Logout successful." }))).into_response()
+    (StatusCode::OK, Json(json!({ "msg": "Logout successful." }))).into_response()
 }
 
 async fn get_user(
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Result<Json<users::Model>, axum::http::StatusCode> {
+) -> Result<Json<users::Model>, StatusCode> {
     let maybe = users::Entity::find_by_id(id).one(&*state.db).await.map_err(|_| {
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     match maybe {
         Some(model) => Ok(Json(model)),
-        None => Err(axum::http::StatusCode::NOT_FOUND),
+        None => Err(StatusCode::NOT_FOUND),
     }
 }
 
 async fn get_user_profile (
     auth_session: AuthSession
-) -> Result<Json<entities::users::Model>, (axum::http::StatusCode, Json<Value>)> {
+) -> Result<Json<users::Model>, (StatusCode, Json<Value>)> {
     match auth_session.user {
         Some(user) => Ok(Json(user)),
-        None => Err((axum::http::StatusCode::BAD_REQUEST, bad_response("User not found".to_string()))),
+        None => Err((StatusCode::BAD_REQUEST, bad_response("User not found".to_string()))),
     }
 }
 
 async fn delete_user(
     State(state): State<AppState>,
     Path(id): Path<i32>,
-) -> Result<Json<Value>, axum::http::StatusCode> {
+) -> Result<Json<Value>, StatusCode> {
     
     let maybe_user_deleted = users::Entity::delete_by_id(id)
         .exec(&*state.db)
         .await
         .map_err(|e| {
             tracing::error!("DB error: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
     if maybe_user_deleted.rows_affected > 0 {
         Ok(Json(json!({ "msg": "Record deleted successfully!" })))
     } else {
-        Err(axum::http::StatusCode::NOT_FOUND)
+        Err(StatusCode::NOT_FOUND)
     }
 
 }
@@ -282,11 +284,11 @@ async fn create_todo(
     State(state): State<AppState>,
     auth_session: AuthSession,
     Json(payload): Json<CreateTodoPayload>,
-) -> Result<Json<entities::todos::Model>, (axum::http::StatusCode, Json<Value>)> {
+) -> Result<Json<todos::Model>, (StatusCode, Json<Value>)> {
     let text = payload.text;
     let is_done = Ok(payload.is_done.unwrap_or(false));
 
-    let new_todo = entities::todos::ActiveModel {
+    let new_todo = todos::ActiveModel {
         text: Set(text),
         is_done: Set(is_done?),
         user_id: Set(auth_session.user.unwrap().id),
@@ -306,7 +308,7 @@ async fn get_todos(
         .filter(todos::Column::UserId.eq(user_id))
         .all(&*state.db)
         .await
-        .map_err(|e| {
+        .map_err(|_| {
             (StatusCode::INTERNAL_SERVER_ERROR, bad_response("Something went wrong with DB.".to_string()))
         });
 
@@ -315,6 +317,68 @@ async fn get_todos(
         Ok(todos) => { Ok(Json(todos))}
         Err(_) => Err((StatusCode::NOT_FOUND, bad_response("No todos found for user.".to_string())))
     }
+}
+
+#[derive(Deserialize)]
+struct UpdateTodoPayload {
+    is_done: Option<bool>,
+    text: Option<String>,
+}
+
+async fn update_todo(
+    State(state): State<AppState>,
+    auth_session: AuthSession,
+    Path(id): Path<i32>,
+    Json(payload): Json<UpdateTodoPayload>,
+) -> Result<Json<todos::Model>, (StatusCode, Json<Value>)> {
+
+    let text = payload.text.unwrap_or("".to_string());
+    let is_done = payload.is_done;
+    let user_id = match auth_session.user {
+        Some(user) => user,
+        None => return Err((StatusCode::INTERNAL_SERVER_ERROR, bad_response("User not found or unauthorized.".to_string()))),
+    }.id;
+
+    let todo: Option<todos::Model> = Todos::find_by_id(id)
+        .one(&*state.db)
+        .await
+        .map_err(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, bad_response("Something went wrong with DB.".to_string()))
+        })?;
+
+    let mut todo: todos::ActiveModel = todo.unwrap().into();
+
+    if todo.user_id.clone().unwrap() != user_id {
+        return Err((StatusCode::FORBIDDEN, bad_response("You do not own this todo.".to_string())))
+    }
+
+
+    if !text.is_empty() {
+        todo.text = Set(text);
+    };
+
+    match is_done {
+        Some(true) => {
+            todo.is_done = Set(true);
+        },
+        Some(false) => {
+            todo.is_done = Set(false);
+        },
+
+        None => {}
+    }
+
+    let updated_todo: todos::Model = match todo.update(&*state.db).await {
+        Ok(model) => model,
+        Err(_) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                bad_response("Update failed.".to_string()),
+            ));
+        }
+    };
+
+    Ok(Json(updated_todo))
 }
 
 // endregion
