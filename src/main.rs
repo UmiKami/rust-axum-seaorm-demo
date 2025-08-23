@@ -11,7 +11,7 @@ use axum::{
 };
 
 use axum_login::{login_required, tower_sessions::{ SessionManagerLayer}, AuthManagerLayerBuilder};
-use axum_csrf_simple::{csrf_protect, get_csrf_token, set_csrf_token_sign_key};
+use axum_csrf_simple::{csrf_protect, get_csrf_token, set_csrf_secure_cookie_enable, set_csrf_token_sign_key};
 use tower_http::cors::{CorsLayer};
 use tower_sessions::{
     Expiry,
@@ -51,7 +51,7 @@ use argon2::{
     },
     Argon2
 };
-
+use axum::http::StatusCode;
 
 // region local helper functions
 
@@ -80,8 +80,9 @@ async fn main() -> anyhow::Result<()> {
         .allow_headers([hyper::header::CONTENT_TYPE, "X-CSRF-TOKEN".parse()?])
         .allow_credentials(true);
 
-    let csrf_key = env::var("CSRF_SESSION_KEY")?;
+    let csrf_key = env::var("CSRF_SESSION_KEY").map_err(|_| anyhow::anyhow!("CSRF_SESSION_KEY not set"))?;
     set_csrf_token_sign_key(csrf_key.as_str()).await;
+    set_csrf_secure_cookie_enable(true).await;
 
     let database_url = env::var("DATABASE_URL")
         .expect("DATABASE_URL must be set (e.g. postgres://user:pass@localhost:5432/axsea)");
@@ -116,6 +117,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/users/{id}", get(get_user))
         .route("/profile", get(get_user_profile))
         .route("/users/{id}", delete(delete_user))
+        .route("/todos", get(get_todos))
+        .route("/todos", post(create_todo))
         .route("/logout", delete(logout))
         .route_layer(login_required!(SeaOrmBackend))
         .route("/", get(|| async {Json( json!( {
@@ -291,6 +294,27 @@ async fn create_todo(
     };
 
     db_insert::<todos::Entity>(state, new_todo).await
+}
+
+async fn get_todos(
+    State(state): State<AppState>,
+    auth_session: AuthSession,
+) -> Result<Json<Vec<todos::Model>>, (StatusCode, Json<Value>)> {
+    let user_id = auth_session.user.unwrap().id;
+
+    let maybe_todos = todos::Entity::find()
+        .filter(todos::Column::UserId.eq(user_id))
+        .all(&*state.db)
+        .await
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, bad_response("Something went wrong with DB.".to_string()))
+        });
+
+
+    match maybe_todos {
+        Ok(todos) => { Ok(Json(todos))}
+        Err(_) => Err((StatusCode::NOT_FOUND, bad_response("No todos found for user.".to_string())))
+    }
 }
 
 // endregion
