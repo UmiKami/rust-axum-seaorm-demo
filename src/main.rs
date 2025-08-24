@@ -306,6 +306,7 @@ async fn get_todos(
 
     let maybe_todos = todos::Entity::find()
         .filter(todos::Column::UserId.eq(user_id))
+        .order_by(todos::Column::Id, Order::Desc)
         .all(&*state.db)
         .await
         .map_err(|_| {
