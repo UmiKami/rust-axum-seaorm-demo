@@ -135,8 +135,8 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
-    tracing::info!("listening on https://{}", addr);
-    tracing::info!("listening on https://localhost:{}", addr.port());
+    tracing::info!("listening on http://{}", addr);
+    tracing::info!("listening on http://localhost:{}", addr.port());
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(anyhow::Error::new)?;
     axum::serve(listener,app.into_make_service()).await?;
