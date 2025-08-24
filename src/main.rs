@@ -335,10 +335,11 @@ async fn update_todo(
 
     let text = payload.text.unwrap_or("".to_string());
     let is_done = payload.is_done;
-    let user_id = match auth_session.user {
-        Some(user) => user,
-        None => return Err((StatusCode::INTERNAL_SERVER_ERROR, bad_response("User not found or unauthorized.".to_string()))),
-    }.id;
+    let user_id = auth::helper::get_user_id(auth_session).await;
+
+    if user_id < 0 {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, bad_response("User not found or unauthorized.".to_string())))
+    }
 
     let todo: Option<todos::Model> = Todos::find_by_id(id)
         .one(&*state.db)
