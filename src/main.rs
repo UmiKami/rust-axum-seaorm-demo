@@ -346,14 +346,20 @@ async fn update_todo(
         return Err((StatusCode::BAD_REQUEST, bad_response("Unable to identify user.".to_string())));
     }
 
-    let todo: Option<todos::Model> = Todos::find_by_id(id)
+    let todo: Option<todos::Model> = Todos::find()
+        .filter(todos::Column::UserId.eq(user_id).and(todos::Column::Id.eq(id)))
         .one(&*state.db)
         .await
         .map_err(|_| {
             (StatusCode::INTERNAL_SERVER_ERROR, bad_response("Something went wrong with DB.".to_string()))
         })?;
 
-    let mut todo: todos::ActiveModel = todo.unwrap().into();
+    let mut todo: todos::ActiveModel = match todo {
+        None => {
+            return Err((StatusCode::NOT_FOUND, bad_response("Either task does not exist or you do not own it.".to_string())))
+        }
+        Some(active_model) => active_model.into()
+    };
 
     if todo.user_id.clone().unwrap() != user_id {
         return Err((StatusCode::FORBIDDEN, bad_response("You do not own this todo.".to_string())))
@@ -399,7 +405,7 @@ async fn delete_todo(
         return Err((StatusCode::BAD_REQUEST, bad_response("Unable to identify user.".to_string())));
     }
 
-    
+
     let todo: todos::Model = match Todos::find()
         .filter(todos::Column::UserId.eq(user_id).and(todos::Column::Id.eq(id)))
         .one(&*state.db)
