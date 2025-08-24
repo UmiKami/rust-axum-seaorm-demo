@@ -35,7 +35,7 @@ use entities::{
         db_insert,
     },
 };
-use sea_orm::{ActiveModelTrait, ActiveValue, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, ModelTrait, Order, QueryFilter, QueryOrder, Set};
 
 // SYSTEM IMPORTS
 use dotenvy::dotenv;
