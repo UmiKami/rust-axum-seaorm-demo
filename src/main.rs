@@ -1,43 +1,40 @@
 mod entities;
 mod auth;
+mod routes;
 
-use entities::users;
-
-use axum::{extract::{Path, State}, routing::{get, post, delete}, Form, Json, Router};
-
-use serde_json::{Value, json};
-
-use dotenvy::dotenv;
-use sea_orm::{ActiveModelTrait, ColumnTrait, Database, DatabaseConnection, EntityTrait, QueryFilter, Set};
-use serde::Deserialize;
-use std::{env, net::SocketAddr};
-use std::sync::Arc;
-use argon2::{
-    password_hash::{
-        rand_core::OsRng,
-         PasswordHasher, SaltString
-    },
-    Argon2
+// AXUM RELATED IMPORTS
+use axum::{
+    http::{HeaderValue, Method},
+    Json,
+    routing::{get},
+    Router
 };
-use axum::http::{HeaderValue, Method};
-use axum::response::IntoResponse;
-use axum_login::{login_required, tower_sessions::{ SessionManagerLayer}, AuthManagerLayerBuilder};
-use tower_http::cors::{CorsLayer};
 
-use tower_sessions::{session_store::ExpiredDeletion, Expiry};
-use tower_sessions::cookie::time::Duration;
+use axum_csrf_simple::{csrf_protect, get_csrf_token, set_csrf_secure_cookie_enable, set_csrf_token_sign_key};
+use axum_login::{tower_sessions::SessionManagerLayer, AuthManagerLayerBuilder};
+use serde_json::json;
+use tower_http::cors::CorsLayer;
+use tower_sessions::{
+    cookie::time::Duration,
+    session_store::ExpiredDeletion,
+    Expiry,
+};
 use tower_sessions_sqlx_store::{sqlx::PgPool, PostgresStore};
-use axum_csrf_simple::{csrf_protect, get_csrf_token, set_csrf_token_sign_key};
 
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use crate::auth::backend::Login;
 use crate::auth::SeaOrmBackend;
 
-#[derive(Clone)]
-struct AppState {
-    db: Arc<DatabaseConnection>
-}
+// DATABASE IMPORTS
+use sea_orm::Database;
 
+// SYSTEM IMPORTS
+use dotenvy::dotenv;
+use std::sync::Arc;
+use std::{env, net::SocketAddr};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+// OTHER
+
+use routes::helper::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -53,11 +50,12 @@ async fn main() -> anyhow::Result<()> {
         .allow_headers([hyper::header::CONTENT_TYPE, "X-CSRF-TOKEN".parse()?])
         .allow_credentials(true);
 
-    let csrf_key = env::var("CSRF_SESSION_KEY")?;
+    let csrf_key = env::var("CSRF_SESSION_KEY").map_err(|_| anyhow::anyhow!("CSRF_SESSION_KEY not set"))?;
     set_csrf_token_sign_key(csrf_key.as_str()).await;
+    set_csrf_secure_cookie_enable(true).await;
 
     let database_url = env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set (e.g. postgres://user:pass@localhost:5432/axsea)");
+        .expect("DATABASE_URL must be set (e.g. postgres://user:pass@localhost:5432/axum_seaorm_demo)");
     let db = Database::connect(&database_url).await?;
     let db = Arc::new(db);
 
@@ -86,17 +84,12 @@ async fn main() -> anyhow::Result<()> {
     let auth_layer = AuthManagerLayerBuilder::new(backend.clone(), session_layer).build();
 
     let app = Router::new()
-        .route("/users/{id}", get(get_user))
-        .route("/profile", get(get_user_profile))
-        .route("/users/{id}", delete(delete_user))
-        .route("/logout", delete(logout))
-        .route_layer(login_required!(SeaOrmBackend))
         .route("/", get(|| async {Json( json!( {
             "msg": "Welcome to rust!"
         } )) } ))
+        .nest("/users", routes::users::router())
+        .nest("/todos", routes::todos::router())
         .route("/health", get(|| async { "ok" }))
-        .route("/signup", post(signup))
-        .route("/login", post(login))
         .route("/get-token", get(get_csrf_token))
         .route_layer(axum::middleware::from_fn(csrf_protect))
         .layer(auth_layer)
@@ -106,139 +99,8 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     tracing::info!("listening on http://{}", addr);
     tracing::info!("listening on http://localhost:{}", addr.port());
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(anyhow::Error::new)?;
     axum::serve(listener,app.into_make_service()).await?;
     Ok(())
-}
-
-
-#[derive(Deserialize)]
-struct CreateUserPayload {
-    name: Option<String>,
-    email: Option<String>,
-    password: Option<String>,
-}
-
-fn bad_response(msg: String) -> Json<Value> {
-    Json(json!({ "error": msg }))
-}
-
-async fn signup(
-    State(state): State<AppState>,
-    Json(payload): Json<CreateUserPayload>,
-) -> Result<Json<users::Model>, (axum::http::StatusCode, Json<Value>)> {
-
-    let email = payload.email.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Email not provided".to_string()) ))?;
-
-    if email.is_empty() || !email.contains("@") {
-        return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Invalid email address".to_string())));
-    }
-
-    let maybe_user = users::Entity::find()
-        .filter(users::Column::Email.eq(&email))
-        .one(&*state.db)
-        .await.map_err(|_| {
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, bad_response("Internal server error".to_string()))
-    })?;
-
-    if let Some(_) = maybe_user {
-        return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Email already exists.".to_string())))
-    }
-
-    let name = payload.name.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Name not provided".to_string()) ))?;
-    let password = payload.password.ok_or((axum::http::StatusCode::BAD_REQUEST, bad_response("Password not provided".to_string()) ))?;
-
-    if password.chars().count() < 8 || password.chars().count() > 64 {
-        return Err((axum::http::StatusCode::BAD_REQUEST, bad_response("Password must be 8-64 characters long.".to_string())))
-    }
-
-    let salt = SaltString::generate(&mut OsRng);
-
-    let hash_password = Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, bad_response("Unable to hash password".to_string())))?
-        .to_string();
-
-    let new_user = users::ActiveModel {
-        name: Set(name),
-        email: Set(email),
-        password: Set(Some(hash_password)),
-        ..Default::default()
-    };
-
-    match new_user.insert(&*state.db).await {
-        Ok(model) => Ok(Json(model)),
-        Err(e) => Err((axum::http::StatusCode::BAD_REQUEST, Json(json!({"msg": e.to_string()})) )),
-    }
-}
-
-type AuthSession = axum_login::AuthSession<SeaOrmBackend>;
-
-async fn login(
-    mut auth_session: AuthSession,
-    Form(creds): Form<Login>,
-) -> impl IntoResponse {
-    let user = match auth_session.authenticate(creds).await {
-        Ok(Some(user)) => user,
-        Ok(None) => return axum::http::StatusCode::UNAUTHORIZED.into_response(),
-        Err(_) => return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-
-    if auth_session.login(&user).await.is_err() {
-        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    (axum::http::StatusCode::OK, Json(json!({ "msg": "Login successful." }))).into_response()
-}
-
-async fn logout(mut auth_session: AuthSession) -> impl IntoResponse {
-    let _ = auth_session
-        .logout()
-        .await.map_err(|_| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, bad_response("Logout failed".to_string())).into_response());
-
-    (axum::http::StatusCode::OK, Json(json!({ "msg": "Logout successful." }))).into_response()
-}
-
-async fn get_user(
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Result<Json<users::Model>, axum::http::StatusCode> {
-    let maybe = users::Entity::find_by_id(id).one(&*state.db).await.map_err(|_| {
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    match maybe {
-        Some(model) => Ok(Json(model)),
-        None => Err(axum::http::StatusCode::NOT_FOUND),
-    }
-}
-
-async fn get_user_profile (
-    auth_session: AuthSession
-) -> Result<Json<entities::users::Model>, (axum::http::StatusCode, Json<Value>)> {
-    match auth_session.user {
-        Some(user) => Ok(Json(user)),
-        None => Err((axum::http::StatusCode::BAD_REQUEST, bad_response("User not found".to_string()))),
-    }
-}
-
-async fn delete_user(
-    State(state): State<AppState>,
-    Path(id): Path<i32>,
-) -> Result<Json<Value>, axum::http::StatusCode> {
-    
-    let maybe_user_deleted = users::Entity::delete_by_id(id)
-        .exec(&*state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("DB error: {e}");
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    if maybe_user_deleted.rows_affected > 0 {
-        Ok(Json(json!({ "msg": "Record deleted successfully!" })))
-    } else {
-        Err(axum::http::StatusCode::NOT_FOUND)
-    }
-
 }
