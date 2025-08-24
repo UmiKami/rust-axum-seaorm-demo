@@ -399,7 +399,9 @@ async fn delete_todo(
         return Err((StatusCode::BAD_REQUEST, bad_response("Unable to identify user.".to_string())));
     }
 
-    let todo: todos::Model = match Todos::find_by_id(id)
+    
+    let todo: todos::Model = match Todos::find()
+        .filter(todos::Column::UserId.eq(user_id).and(todos::Column::Id.eq(id)))
         .one(&*state.db)
         .await
         .map_err(|_| {
