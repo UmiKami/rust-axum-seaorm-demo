@@ -120,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/todos", get(get_todos))
         .route("/todos", post(create_todo))
         .route("/todos/{id}", put(update_todo))
+        .route("/todos/{id}", delete(delete_todo))
         .route("/logout", delete(logout))
         .route_layer(login_required!(SeaOrmBackend))
         .route("/", get(|| async {Json( json!( {
@@ -381,6 +382,43 @@ async fn update_todo(
     };
 
     Ok(Json(updated_todo))
+}
+
+async fn delete_todo(
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+    auth_session: AuthSession,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = auth::helper::get_user_id(auth_session).await;
+
+    if user_id < 0 {
+        return Err((StatusCode::BAD_REQUEST, bad_response("User not found or unauthorized.".to_string())))
+    }
+
+    let todo: todos::Model = match Todos::find_by_id(id)
+        .one(&*state.db)
+        .await
+        .map_err(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, bad_response("Something went wrong while attempting to find task.".to_string()))
+        })? {
+            Some(model) => model,
+            _ => {
+                return Err((StatusCode::NOT_FOUND, bad_response("Task not found.".to_string())))
+            }
+    };
+
+    let res = todo.delete(&*state.db)
+        .await
+        .map_err(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, bad_response("Something went wrong while attempting to delete task.".to_string()))
+        })?;
+
+    if res.rows_affected == 1 {
+        return Ok(Json(json!({ "msg": "Deleted task" })))
+    }
+
+    Err((StatusCode::BAD_REQUEST, bad_response("Something went very wrong..".to_string())))
+
 }
 
 // endregion
