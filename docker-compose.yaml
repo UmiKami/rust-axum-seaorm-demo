@@ -1,0 +1,31 @@
+services:
+  web:
+    build: .
+    ports:
+      - "5000:3000"
+    environment:
+      DATABASE_URL: "postgres://postgres:${DB_PASSWORD}@postgres:5432/axum_seaorm_demo"
+      SESSION_DATABASE_URL: "postgres://postgres:${DB_PASSWORD}@postgres:5432/axum_sessions"
+    depends_on:
+      - postgres
+    networks:
+      - backend
+
+  postgres:
+    image: postgres:17.6-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "${DB_PASSWORD}"
+      POSTGRES_MULTIPLE_DATABASES: axum_seaorm_demo, axum_sessions
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+
+volumes:
+  pgdata:
+
+networks:
+  backend:
+    driver: bridge
