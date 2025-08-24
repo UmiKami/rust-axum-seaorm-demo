@@ -292,7 +292,7 @@ async fn create_todo(
     let new_todo = todos::ActiveModel {
         text: Set(text),
         is_done: Set(is_done?),
-        user_id: Set(auth_session.user.unwrap().id),
+        user_id: Set(auth::helper::get_user_id(auth_session).await),
         ..Default::default()
     };
 
@@ -303,7 +303,11 @@ async fn get_todos(
     State(state): State<AppState>,
     auth_session: AuthSession,
 ) -> Result<Json<Vec<todos::Model>>, (StatusCode, Json<Value>)> {
-    let user_id = auth_session.user.unwrap().id;
+    let user_id = auth::helper::get_user_id(auth_session).await;
+
+    if user_id < 0 {
+        return Err((StatusCode::BAD_REQUEST, bad_response("Unable to identify user.".to_string())));
+    }
 
     let maybe_todos = todos::Entity::find()
         .filter(todos::Column::UserId.eq(user_id))
@@ -339,7 +343,7 @@ async fn update_todo(
     let user_id = auth::helper::get_user_id(auth_session).await;
 
     if user_id < 0 {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, bad_response("User not found or unauthorized.".to_string())))
+        return Err((StatusCode::BAD_REQUEST, bad_response("Unable to identify user.".to_string())));
     }
 
     let todo: Option<todos::Model> = Todos::find_by_id(id)
@@ -392,7 +396,7 @@ async fn delete_todo(
     let user_id = auth::helper::get_user_id(auth_session).await;
 
     if user_id < 0 {
-        return Err((StatusCode::BAD_REQUEST, bad_response("User not found or unauthorized.".to_string())))
+        return Err((StatusCode::BAD_REQUEST, bad_response("Unable to identify user.".to_string())));
     }
 
     let todo: todos::Model = match Todos::find_by_id(id)
