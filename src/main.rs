@@ -316,13 +316,9 @@ async fn get_todos(
         .await
         .map_err(|_| {
             (StatusCode::INTERNAL_SERVER_ERROR, bad_response("Something went wrong with DB.".to_string()))
-        });
+        })?;
 
-
-    match maybe_todos {
-        Ok(todos) => { Ok(Json(todos))}
-        Err(_) => Err((StatusCode::NOT_FOUND, bad_response("No todos found for user.".to_string())))
-    }
+    Ok(Json(maybe_todos))
 }
 
 #[derive(Deserialize)]
