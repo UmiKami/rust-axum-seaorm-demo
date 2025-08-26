@@ -6,6 +6,8 @@ services:
     environment:
       DATABASE_URL: "postgres://postgres:${DB_PASSWORD}@postgres:5432/axum_seaorm_demo"
       SESSION_DATABASE_URL: "postgres://postgres:${DB_PASSWORD}@postgres:5432/axum_sessions"
+      CSRF_SESSION_KEY: "${CSRF_SESSION_KEY}"
+      RUST_LOG: "info,axum_seaorm_demo=debug,tower_http=info"
     depends_on:
       - postgres
     networks:
@@ -20,6 +22,20 @@ services:
       POSTGRES_MULTIPLE_DATABASES: axum_seaorm_demo, axum_sessions
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "cat /initialised.txt && pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    entrypoint: [ "/bin/bash", "-c","
+        docker-entrypoint.sh postgres &
+        rm -f /initialised.txt || true &&
+        until pg_isready -U postgres; do sleep 3; done &&
+        psql -U postgres -d postgres -c 'CREATE DATABASE axum_seaorm_demo;' || true &&
+        psql -U postgres -d postgres -c 'CREATE DATABASE axum_sessions;' || true &&
+        echo done > /initialised.txt &&
+        wait"
+      ]
     networks:
       - backend
 
