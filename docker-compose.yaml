@@ -2,7 +2,7 @@ services:
   web:
     build: .
     ports:
-      - "5000:3000"
+      - "5001:3000"
     environment:
       DATABASE_URL: "postgres://postgres:${DB_PASSWORD}@postgres:5432/axum_seaorm_demo"
       SESSION_DATABASE_URL: "postgres://postgres:${DB_PASSWORD}@postgres:5432/axum_sessions"
