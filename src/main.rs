@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderValue, Method},
     Json,
     routing::{get},
-    Router
+    Router,
 };
 
 use axum_csrf_simple::{csrf_protect, get_csrf_token, set_csrf_secure_cookie_enable, set_csrf_token_sign_key};
