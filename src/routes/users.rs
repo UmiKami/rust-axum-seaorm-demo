@@ -1,3 +1,4 @@
+use std::env;
 use axum::{
     Form, Json, Router,
     extract::{State},
@@ -19,9 +20,10 @@ use crate::entities::{
     helper::{
         db_insert,
     },
+    o_auth_accounts
 };
-use sea_orm::{ ColumnTrait, EntityTrait, QueryFilter, Set};
-
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, ModelTrait, QueryFilter, Set};
+use reqwest::Client;
 
 // OTHER
 use argon2::{
@@ -31,9 +33,22 @@ use argon2::{
     },
     Argon2
 };
+use axum::extract::Query;
 use axum::http::StatusCode;
+use axum::response::{Redirect, Response};
 use axum_login::login_required;
 use crate::routes::helper::{bad_response, AppState, AuthSession};
+use oauth_axum::providers::github::GithubProvider;
+use oauth_axum::{ OAuthClient};
+use sea_orm::sea_query::token;
+use tower_sessions::Session;
+use crate::entities::users::Model;
+
+#[derive(Clone, serde::Deserialize)]
+pub struct QueryAxumCallback {
+    pub code: String,
+    pub state: String,
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -44,6 +59,8 @@ pub fn router() -> Router<AppState> {
         // public routes 👇
         .route("/signup", post(signup))
         .route("/login", post(login))
+        .route("/login/github", get(oauth_github_create_url))
+        .route("/github/callback", get(oauth_github_callback))
 }
 
 
@@ -136,3 +153,174 @@ async fn get_user_profile (
         None => Err((StatusCode::BAD_REQUEST, bad_response("User not found".to_string()))),
     }
 }
+
+// region OAUTH GitHub
+
+pub async fn oauth_github_create_url( session: Session) -> String {
+    let github_client_id: String = env::var("GITHUB_CLIENT_ID").expect("GITHUB_CLIENT_ID not set");
+    let github_client_secret: String = env::var("GITHUB_CLIENT_SECRET").expect("GITHUB_CLIENT_SECRET not set");
+    let redirect_url: String = "http://localhost:3000/users/github/callback".to_string();
+
+    let state_oauth = GithubProvider::new(
+        github_client_id,
+        github_client_secret,
+        redirect_url
+    )
+        .generate_url(
+            Vec::from(["users.read".to_string()]),
+            |state_e| async move {
+                //SAVE THE DATA IN THE DB OR MEMORY
+                //state should be your ID
+                session
+                    .insert("oauth_state", &state_e.state)
+                    .await
+                    .unwrap();
+                session
+                    .insert("oauth_verifier", &state_e.verifier)
+                    .await
+                    .unwrap();
+            },
+        )
+        .await
+        .ok()
+        .unwrap()
+        .state
+        .unwrap();
+
+    state_oauth.url_generated.unwrap()
+}
+
+#[derive(Deserialize, Debug)]
+struct GithubUser {
+    login: String,
+    id: u64,
+    avatar_url: Option<String>,
+    email: Option<String>,
+    name: Option<String>,
+}
+async fn fetch_github_user(token: &str) -> anyhow::Result<GithubUser> {
+    let client = Client::new();
+    let user: GithubUser = client
+        .get("https://api.github.com/user")
+        .bearer_auth(token)
+        .header("User-Agent", "AxumSeaOrmDemo") // GitHub requires this
+        .send()
+        .await?
+        .json()
+        .await?;
+    Ok(user)
+}
+pub async fn oauth_github_callback(
+    State(state): State<AppState>,
+    session: Session,
+    Query(queries): Query<QueryAxumCallback>,
+    mut auth_session: AuthSession, // needed to log in user if linked
+) -> Response {
+    // --- 1. Validate OAuth state from session ---
+    let expected_state: Option<String> = session.get("oauth_state").await.unwrap();
+    let verifier: Option<String> = session.get("oauth_verifier").await.unwrap();
+
+    if expected_state.is_none() || verifier.is_none() {
+        return (StatusCode::BAD_REQUEST, bad_response("OAuth session missing".into())).into_response();
+    }
+
+    if queries.state != expected_state.clone().unwrap() {
+        return (StatusCode::BAD_REQUEST, bad_response("Invalid state".into())).into_response();
+    }
+
+    // --- 2. Exchange code for token ---
+    let github_client_id = env::var("GITHUB_CLIENT_ID").expect("GITHUB_CLIENT_ID not set");
+    let github_client_secret = env::var("GITHUB_CLIENT_SECRET").expect("GITHUB_CLIENT_SECRET not set");
+    let redirect_url: String = "http://localhost:3000/users/github/callback".to_string();
+
+    let token = match GithubProvider::new(
+        github_client_id,
+        github_client_secret,
+        redirect_url,
+    )
+        .generate_token(queries.code, verifier.unwrap())
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to generate token: {:?}",  match e {
+                oauth_axum::error::OauthError::TokenRequestFailed => {
+                    "Token request failed"
+                }
+                oauth_axum::error::OauthError::AuthUrlCreationFailed => {
+                    "Auth url creation failed"
+                }
+            });
+            (StatusCode::BAD_REQUEST, bad_response("Token exchange failed".into())).into_response()
+        }) {
+        Ok(token) => {token}
+        Err(e) => {
+            return e
+        }
+    };
+
+    // cleanup session values
+    session.remove::<String>("oauth_state").await.unwrap();
+    session.remove::<String>("oauth_verifier").await.unwrap();
+
+    // --- 3. Fetch GitHub user profile ---
+    let github_user = match fetch_github_user(&token).await
+        .map_err(|_| (StatusCode::BAD_REQUEST, bad_response("Failed to fetch GitHub user profile".into())).into_response())
+    {
+        Ok(user) => {user}
+        Err(e) => {
+            return e
+        }
+    };
+
+    // --- 4. Check if oauth account exists ---
+    let existing_account = o_auth_accounts::Entity::find()
+        .filter(o_auth_accounts::Column::Provider.eq("github"))
+        .filter(o_auth_accounts::Column::ProviderAccountId.eq(github_user.id.to_string()))
+        .one(&*state.db)
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, bad_response("DB lookup failed".into())));
+
+    if let Ok(Some(account)) = existing_account {
+        // already linked → fetch related user
+        let user = match account.find_related(users::Entity)
+            .one(&*state.db)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, bad_response("User lookup failed".into())).into_response())
+        {
+            Ok(model) => {model.unwrap()}
+            Err(e) => {
+                 return e;
+            }
+        };
+
+
+        // log them in
+        auth_session.login(&user).await.unwrap();
+
+        let redirect = Redirect::temporary("http://localhost:5173/");
+        return redirect.into_response();
+    };
+
+    // --- 5. Not linked yet ---
+    if let Some(current_user) = &auth_session.user {
+        // logged-in user → link GitHub account to them
+        let new_oauth = o_auth_accounts::ActiveModel {
+            provider: Set("github".to_string()),
+            provider_account_id: Set(github_user.id.to_string()),
+            access_token: Set(Some(token.clone())),
+            refresh_token: Set(None), // GitHub usually doesn’t give refresh_token
+            user_id: Set(Some(current_user.id)),
+            ..Default::default()
+        };
+        new_oauth.insert(&*state.db).await.unwrap();
+
+        let redirect = Redirect::temporary("http://localhost:5173/");
+        return redirect.into_response();
+    }
+
+    // not linked & not logged in → ask user to log in first
+    (StatusCode::UNAUTHORIZED, bad_response(
+        "No linked account. Please log in first to connect GitHub.".into()
+    )).into_response()
+}
+
+// regionend
